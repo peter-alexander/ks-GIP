@@ -10,7 +10,7 @@ calculate_build_config_hash() {
 		scripts/build-network-job.sh \
 		scripts/build-reference-job.sh \
 		scripts/deploy-gip.sh \
-		.github/workflows/gip.yml \
+		.github/workflows/publish.yml \
 		"$LINK_FILTER_JSON" \
 		"$LINK_SPEED_FILTER_JSON" \
 		"$LINK_EINBAHN_FILTER_JSON" |
