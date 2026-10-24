@@ -1,0 +1,71 @@
+name: Refresh GIP lookup catalog
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'gip-lookups/**'
+      - '.github/scripts/lftp-upload.sh'
+      - '.github/workflows/gip-lookups.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'gip-lookups/**'
+      - '.github/scripts/lftp-upload.sh'
+      - '.github/workflows/gip-lookups.yml'
+  schedule:
+    - cron: '37 4 * * *'
+
+concurrency:
+  group: gip-lookups
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MAPS_FTP_HOST: ${{ secrets.MAPS_FTP_HOST }}
+      MAPS_FTP_USER: ${{ secrets.MAPS_FTP_USER }}
+      MAPS_FTP_PASSWORD: ${{ secrets.MAPS_FTP_PASSWORD }}
+      REMOTE_ROOT: /default-website/Maps
+      CURRENT_URL: https://fahrrad.lima-city.de/Maps/GIP/GipLookups.json
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Install unzip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lftp unzip
+
+      - name: Build GIP lookup catalog
+        run: bash gip-lookups/run.sh
+
+      - name: Check whether production file changed
+        id: changed
+        run: |
+          if curl -fsS --retry 3 --retry-delay 2 -o /tmp/current-gip-lookups.json "$CURRENT_URL" \
+            && cmp -s /tmp/current-gip-lookups.json gip-lookups/build/GipLookups.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "GIP lookup catalog unchanged."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "GIP lookup catalog changed or production file is unavailable."
+          fi
+
+      - name: Deploy GIP lookup catalog to Lima
+        if: github.event_name != 'pull_request' && steps.changed.outputs.changed == 'true'
+        run: |
+          chmod +x .github/scripts/lftp-upload.sh
+          .github/scripts/lftp-upload.sh \
+            gip-lookups/build/GipLookups.json \
+            "${REMOTE_ROOT%/}/GIP/GipLookups.json"

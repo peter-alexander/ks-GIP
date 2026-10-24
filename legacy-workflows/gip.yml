@@ -1,0 +1,198 @@
+name: Build GIP tiles
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Build even if the source fingerprint is unchanged
+        required: false
+        type: boolean
+        default: false
+      build_pmtiles:
+        description: Build and upload PMTiles
+        required: false
+        type: boolean
+        default: true
+      build_legacy_tiles:
+        description: Build and upload legacy PBF tile directories
+        required: false
+        type: boolean
+        default: false
+      skip_upload:
+        description: Build artifacts but do not deploy them
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 3 * * *"
+
+concurrency:
+  group: gip-build
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      fingerprint: ${{ steps.check.outputs.fingerprint }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Keep scheduled workflow enabled
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method PUT "/repos/${GITHUB_REPOSITORY}/actions/workflows/gip.yml/enable"
+
+      - name: Check source fingerprint
+        id: check
+        env:
+          PUBLIC_FINGERPRINT_URL: ${{ secrets.PUBLIC_FINGERPRINT_URL }}
+          FORCE_BUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force_build || 'false' }}
+          BUILD_PMTILES: ${{ github.event_name != 'workflow_dispatch' || inputs.build_pmtiles }}
+          BUILD_LEGACY_TILES: ${{ github.event_name == 'workflow_dispatch' && inputs.build_legacy_tiles }}
+        run: bash scripts/check-gip.sh
+
+  build-network:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Disk before dependency installation
+        run: df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin unzip curl jq tippecanoe
+
+      - name: Build network outputs
+        env:
+          BUILD_PMTILES: ${{ github.event_name != 'workflow_dispatch' || inputs.build_pmtiles }}
+          BUILD_LEGACY_TILES: ${{ github.event_name == 'workflow_dispatch' && inputs.build_legacy_tiles }}
+          EINBAHN_WHERE: ${{ vars.EINBAHN_WHERE || '' }}
+        run: bash scripts/build-network-job.sh
+
+      - name: Upload network artifact
+        id: artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: gip-network-${{ github.run_id }}
+          path: dist/network/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  build-reference:
+    needs: [check, build-network]
+    if: needs.check.outputs.should_build == 'true' && needs.build-network.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Disk before dependency installation
+        run: df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin unzip curl jq tippecanoe
+
+      - name: Build reference outputs
+        env:
+          BUILD_PMTILES: ${{ github.event_name != 'workflow_dispatch' || inputs.build_pmtiles }}
+          BUILD_LEGACY_TILES: ${{ github.event_name == 'workflow_dispatch' && inputs.build_legacy_tiles }}
+        run: bash scripts/build-reference-job.sh
+
+      - name: Upload reference artifact
+        id: artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: gip-reference-${{ github.run_id }}
+          path: dist/reference/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  deploy:
+    needs: [check, build-network, build-reference]
+    if: needs.check.outputs.should_build == 'true' && needs.build-network.result == 'success' && needs.build-reference.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install deploy dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lftp curl
+
+      - name: Download network artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: gip-network-${{ github.run_id }}
+          path: dist/network
+
+      - name: Download reference artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: gip-reference-${{ github.run_id }}
+          path: dist/reference
+
+      - name: Show deploy inputs
+        run: |
+          df -h
+          du -sh dist/network dist/reference
+          find dist -maxdepth 2 -type f -printf '%p\t%s bytes\n' | sort
+
+      - name: Deploy GIP outputs
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_upload) }}
+        env:
+          GIP_FINGERPRINT: ${{ needs.check.outputs.fingerprint }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_TARGET_DIR: ${{ secrets.FTP_TARGET_DIR }}
+          FTP_PROTOCOL: ${{ vars.FTP_PROTOCOL || 'ftp' }}
+          LEGACY_UPLOAD_PARALLEL: ${{ vars.LEGACY_UPLOAD_PARALLEL || '4' }}
+          FTP_RETRIES: ${{ vars.FTP_RETRIES || '10' }}
+          FTP_RETRY_DELAY: ${{ vars.FTP_RETRY_DELAY || '30' }}
+          FTP_RETRY_MAX_TIME: ${{ vars.FTP_RETRY_MAX_TIME || '900' }}
+          FTP_CONNECT_TIMEOUT: ${{ vars.FTP_CONNECT_TIMEOUT || '30' }}
+          FTP_SSL_VERIFY: ${{ vars.FTP_SSL_VERIFY || 'no' }}
+          FTP_SIZE_CHECK_MAX_TIME: ${{ vars.FTP_SIZE_CHECK_MAX_TIME || '60' }}
+          FTP_SIZE_CHECK_RETRIES: ${{ vars.FTP_SIZE_CHECK_RETRIES || '2' }}
+          FTP_SIZE_CHECK_RETRY_DELAY: ${{ vars.FTP_SIZE_CHECK_RETRY_DELAY || '10' }}
+          LFTP_RETRIES: ${{ vars.LFTP_RETRIES || '10' }}
+          LFTP_RETRY_DELAY: ${{ vars.LFTP_RETRY_DELAY || '30' }}
+          LFTP_NET_TIMEOUT: ${{ vars.LFTP_NET_TIMEOUT || '30' }}
+          LFTP_SSL_FORCE: ${{ vars.LFTP_SSL_FORCE || 'true' }}
+          LFTP_SSL_VERIFY: ${{ vars.LFTP_SSL_VERIFY || 'no' }}
+        run: bash scripts/deploy-gip.sh
+
+      - name: Delete temporary artifacts after successful deploy
+        if: ${{ success() && !(github.event_name == 'workflow_dispatch' && inputs.skip_upload) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NETWORK_ARTIFACT_ID: ${{ needs.build-network.outputs.artifact_id }}
+          REFERENCE_ARTIFACT_ID: ${{ needs.build-reference.outputs.artifact_id }}
+        run: |
+          gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${NETWORK_ARTIFACT_ID}"
+          gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${REFERENCE_ARTIFACT_ID}"

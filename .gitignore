@@ -1,0 +1,12 @@
+*.zip
+*.gpkg
+*.geojson
+*.pmtiles
+LINK/
+RFA/
+EINBAHN/
+LINEAR_USE/
+GIP-LINK/
+GIP-RFA/
+work/
+out/
