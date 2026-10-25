@@ -1,0 +1,93 @@
+name: Recover GIP publication from run 40145472263
+
+on:
+  push:
+    paths:
+      - '.github/workflows/recover-gip-publish.yml'
+
+permissions:
+  contents: read
+  actions: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: gip-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 40145472263
+          name: gip-network
+          path: dist/network
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 40145472263
+          name: gip-reference
+          path: dist/reference
+      - name: Build original GIP lookup catalog
+        run: bash gip-lookups/run.sh
+      - name: Assemble Pages site and check size
+        env:
+          GIP_FINGERPRINT: 3ead3958276eb5210e456fdead619992fba22257d937a978f3b754cf51b5e95c
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import time
+
+          outputs = {
+              "link.pmtiles": Path("dist/network/link.pmtiles"),
+              "link-speed.pmtiles": Path("dist/network/link-speed.pmtiles"),
+              "link-einbahn.pmtiles": Path("dist/network/link-einbahn.pmtiles"),
+              "linear-use.pmtiles": Path("dist/network/linear-use.pmtiles"),
+              "rfa.pmtiles": Path("dist/reference/rfa.pmtiles"),
+              "GipLookups.json": Path("gip-lookups/build/GipLookups.json"),
+          }
+          missing = [str(p) for p in outputs.values() if not p.is_file() or p.stat().st_size == 0]
+          if missing:
+              raise SystemExit("Missing or empty build output: " + ", ".join(missing))
+          total = sum(p.stat().st_size for p in outputs.values())
+          print("Total published bytes:", total)
+          if total > 1_000_000_000:
+              raise SystemExit("GitHub Pages cannot publish a site over 1 GB. No deployment attempted.")
+          public = Path("pages")
+          public.mkdir(exist_ok=True)
+          for name, path in outputs.items():
+              shutil.copy2(path, public / name)
+          (public / "source-fingerprint.txt").write_text(os.environ["GIP_FINGERPRINT"] + "\n")
+          stamp = str(int(time.time()))
+          (public / "asset-versions.json").write_text(
+              json.dumps({"schema": 1, "files": {name: stamp for name in outputs}}, indent=2) + "\n"
+          )
+          PY
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: pages/
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Notify Kartensammlung asset versions
+        env:
+          HOST: ${{ secrets.HOST }}
+        run: |
+          test -n "$HOST"
+          curl --fail --silent --show-error --retry 3 --retry-delay 5 \
+            "https://${HOST}/Maps/AssetVersions/refresh.php?repo=ks-GIP"
