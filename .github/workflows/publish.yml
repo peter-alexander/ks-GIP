@@ -27,6 +27,8 @@ jobs:
       fingerprint: ${{ steps.check.outputs.fingerprint }}
     steps:
       - uses: actions/checkout@v7
+      - name: Check GIP lookup JavaScript syntax
+        run: node --check gip-lookups/build.mjs
       - name: Check GIP source fingerprint
         id: check
         env:
