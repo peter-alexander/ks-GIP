@@ -318,7 +318,7 @@ for (
 					numeric: true,
 					sensitivity: "base"
 				}
-		))
+		)))
 ) {
 	const rows = readLookupCsv(
 		path.join(
